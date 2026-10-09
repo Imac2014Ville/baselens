@@ -1,14 +1,16 @@
 # BaseLens
 
-Pay-per-call Base mainnet utilities for AI agents. **No API key, no signup.** Each call costs **$0.01 USDC on Base**, paid automatically via [x402](https://x402.org).
+Pay-per-call tools for AI agents. **No API key, no signup.** Pay per call in **USDC on Base**, automatically via [x402](https://x402.org). Listed on [x402scan](https://www.x402scan.com).
 
 **Live:** https://baselens.imac2014ville.workers.dev · [OpenAPI](https://baselens.imac2014ville.workers.dev/openapi.json)
 
-| Endpoint | What it does |
-|---|---|
-| `POST /tx` `{ "hash": "0x…" }` | Explains a Base transaction in plain English: status, confirmations, fee, decoded ERC-20 transfers (symbol + amount). Handy for **verifying a payment landed**. |
-| `POST /wallet` `{ "address": "0x…" }` | ETH balance, nonce, EOA vs contract (detects EIP-7702 delegation), balances of USDC, USDbC, WETH, cbBTC, cbETH, DAI, EURC, AERO. |
-| `POST /x402check` `{ "url": "https://…", "method": "GET" }` | Health-checks another x402 endpoint **before you pay it**: reachable, latency, x402 version, USD price, network, payTo, discovery metadata, spec issues. |
+| Endpoint | Price | What it does |
+|---|---|---|
+| `POST /token-risk` `{ "token": "0x…" }` | $0.02 | **Scam/honeypot check for Base tokens before you buy.** Simulates a sell into the main pool and detects owner powers (mint, blacklist, pause, fee changes, upgradeable proxy). Also reports ownership renounced, owner holdings, USD liquidity across Uniswap v2/v3 and Aerodrome, LP burn and price. Verdict `LOW_RISK` / `CAUTION` / `HIGH_RISK` / `AVOID` + 0-100 score. |
+| `POST /fetch` `{ "url": "https://…" }` | $0.004 | Any web page as clean, LLM-ready markdown: main content, title, description, links, word count. SSRF-safe. |
+| `POST /tx` `{ "hash": "0x…" }` | $0.01 | Explains a Base transaction in plain English: status, confirmations, fee, decoded ERC-20 transfers (symbol + amount). Handy for **verifying a payment landed**. |
+| `POST /wallet` `{ "address": "0x…" }` | $0.005 | ETH balance, nonce, EOA vs contract (detects EIP-7702 delegation), balances of USDC, USDbC, WETH, cbBTC, cbETH, DAI, EURC, AERO. |
+| `POST /x402check` `{ "url": "https://…", "method": "GET" }` | $0.01 | Health-checks another x402 endpoint **before you pay it**: reachable, latency, x402 version, USD price, network, payTo, discovery metadata, spec issues. |
 
 `GET` with query params works too (`/tx?hash=0x…`).
 

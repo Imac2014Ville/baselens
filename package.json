@@ -1,0 +1,18 @@
+{
+  "name": "baselens",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Pay-per-call Base chain utilities for AI agents (x402, USDC on Base)",
+  "license": "MIT",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "dependencies": {
+    "@x402/core": "^2.26.0",
+    "@x402/evm": "^2.26.0",
+    "@x402/extensions": "^2.26.0",
+    "@x402/hono": "^2.26.0",
+    "hono": "^4.13.11"
+  }
+}

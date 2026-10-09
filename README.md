@@ -4,6 +4,8 @@ Pay-per-call tools for AI agents. **No API key, no signup.** Pay per call in **U
 
 **Live:** https://baselens.imac2014ville.workers.dev · [OpenAPI](https://baselens.imac2014ville.workers.dev/openapi.json)
 
+Landing page: https://baselens.imac2014ville.workers.dev/ · Payments settle via PayAI with automatic failover.
+
 | Endpoint | Price | What it does |
 |---|---|---|
 | `POST /token-risk` `{ "token": "0x…" }` | $0.02 | **Scam/honeypot check for Base tokens before you buy.** Simulates a sell into the main pool and detects owner powers (mint, blacklist, pause, fee changes, upgradeable proxy). Also reports ownership renounced, owner holdings, USD liquidity across Uniswap v2/v3 and Aerodrome, LP burn and price. Verdict `LOW_RISK` / `CAUTION` / `HIGH_RISK` / `AVOID` + 0-100 score. |

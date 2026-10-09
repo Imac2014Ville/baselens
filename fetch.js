@@ -21,7 +21,7 @@ function ipv4Blocked(h) {
   return false;
 }
 
-function checkUrl(u) {
+export function checkUrl(u) {
   if (u.protocol !== "http:" && u.protocol !== "https:") return "only http/https URLs are allowed";
   let h = u.hostname.toLowerCase().replace(/\.$/, "");
   if (!h) return "missing hostname";

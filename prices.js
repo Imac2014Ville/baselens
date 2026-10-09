@@ -24,6 +24,7 @@ function normalize(q) {
     if (!n.priceType) throw new Error("priceType must be Consumption, Reservation or Spot");
   }
   if (!n.priceType) n.priceType = "Consumption"; // default: pay-as-you-go
+  for (const k of ["service", "region", "sku"]) if (n[k] && !/^[\w .\-]{1,64}$/.test(n[k])) throw new Error(`${k} may only contain letters, digits, space, _ . - (max 64 chars)`);
   if (n.os && n.os !== "linux" && n.os !== "windows") throw new Error("os must be linux or windows");
   return n;
 }

@@ -2,8 +2,9 @@
 import { Hono } from "hono";
 import { paymentMiddleware, x402ResourceServer } from "@x402/hono";
 import { ExactEvmScheme } from "@x402/evm/exact/server";
-import { HTTPFacilitatorClient } from "@x402/core/server";
-import { fetchMarkdown } from "./fetch.js";
+import { landingHtml, llmsTxt, robotsTxt, sitemapXml } from "./landing.js";
+import { FailoverFacilitatorClient } from "./facilitator.js";
+import { fetchMarkdown, checkUrl } from "./fetch.js";
 import { newPools } from "./pools.js";
 import { cloudPrices } from "./prices.js";
 import { tokenRisk, rpcBatch as rpcBatchRaw } from "./risk.js";
@@ -11,7 +12,6 @@ import { bazaarResourceServerExtension, declareDiscoveryExtension } from "@x402/
 
 const PAY_TO = "0x5b60a748582169C1cD3799B09406aFe99F174B88";
 const NETWORK = "eip155:8453";
-const FACILITATOR = "https://facilitator.payai.network";
 const PRICE = "$0.01";
 
 const TOKENS = {
@@ -53,7 +53,7 @@ async function explainTx(hash) {
   if (!tx) return { found: false, hash, note: "Transaction not found on Base mainnet (wrong chain, or not yet propagated)." };
   const block = rc ? await rpc("eth_getBlockByNumber", [rc.blockNumber, false]) : null;
   const transfers = (rc?.logs || []).filter(l => l.topics[0] === TRANSFER && l.topics.length === 3);
-  const meta = await tokenMeta([...new Set(transfers.map(l => l.address.toLowerCase()))]);
+  const meta = await tokenMeta([...new Set(transfers.map(l => l.address.toLowerCase()))].slice(0, 30)); // cap RPC fan-out on airdrop-style txs
   const fee = rc ? hexToBig(rc.gasUsed) * hexToBig(rc.effectiveGasPrice) + hexToBig(rc.l1Fee) : null;
   const tokenTransfers = transfers.map(l => {
     const m = meta[l.address.toLowerCase()] || {}, raw = hexToBig(l.data);
@@ -114,7 +114,7 @@ async function x402Check(target, method = "GET") {
   const options = accepts.map(a => {
     const atomic = a.amount ?? a.maxAmountRequired;
     const known = Object.entries(TOKENS).find(([, t]) => t.toLowerCase() === String(a.asset).toLowerCase());
-    const usd = atomic && known && ["USDC", "USDbC", "DAI"].includes(known[0]) ? Number(fmt(BigInt(atomic), known[0] === "DAI" ? 18 : 6)) : null;
+    const usd = /^\d+$/.test(String(atomic)) && known && ["USDC", "USDbC", "DAI"].includes(known[0]) ? Number(fmt(BigInt(atomic), known[0] === "DAI" ? 18 : 6)) : null;
     if (!a.payTo) issues.push("payment option missing payTo");
     if (!atomic) issues.push("payment option missing amount");
     return { scheme: a.scheme, network: a.network, asset: a.asset, assetSymbol: known?.[0] ?? a.extra?.name ?? null, amountAtomic: atomic, priceUsd: usd, payTo: a.payTo, maxTimeoutSeconds: a.maxTimeoutSeconds };
@@ -126,7 +126,7 @@ async function x402Check(target, method = "GET") {
 
 // ---------- app ----------
 const app = new Hono();
-const server = new x402ResourceServer(new HTTPFacilitatorClient({ url: FACILITATOR }))
+const server = new x402ResourceServer(new FailoverFacilitatorClient())
   .register(NETWORK, new ExactEvmScheme());
 server.registerExtension(bazaarResourceServerExtension);
 
@@ -183,26 +183,83 @@ for (const [k, r] of Object.entries(ROUTES)) {
 // Workers forbid I/O at global scope and sharing promises across requests, so the
 // facilitator sync runs inside whichever request gets there first, until it succeeds.
 let paywall, synced = false;
+// Params come from the query string (GET) or a JSON body (POST).
+const params = async c => { const p = c.req.method === "POST" ? await c.req.json().catch(() => null) : c.req.query(); return p && typeof p === "object" && !Array.isArray(p) ? p : {}; };
+const VAL_ID = /^[\w .\-]{1,64}$/;
+// Returns an error string for invalid input, else null. Runs BEFORE the paywall so buyers are never charged for a 400.
+function validate(path, p) {
+  const str = v => v === undefined || v === null || v === "" || typeof v === "string" || typeof v === "number" || typeof v === "boolean";
+  switch (path) {
+    case "/tx": return isHash(p.hash) ? null : "pass ?hash=0x…(64 hex)";
+    case "/wallet": return isAddr(p.address) ? null : "pass ?address=0x…(40 hex)";
+    case "/token-risk": return isAddr(p.token) ? null : "pass token=0x…(40 hex)";
+    case "/fetch": {
+      if (typeof p.url !== "string" || !p.url) return "pass url=https://…";
+      let u; try { u = new URL(p.url); } catch { return "invalid url"; }
+      return checkUrl(u);
+    }
+    case "/x402check": {
+      if (typeof p.url !== "string" || !p.url) return "pass ?url=https://…";
+      let u; try { u = new URL(p.url); } catch { return "invalid url"; }
+      if (u.protocol !== "https:") return "only https urls are checked";
+      if (p.method !== undefined && !["GET", "POST"].includes(String(p.method).toUpperCase())) return "method must be GET or POST";
+      return null;
+    }
+    case "/new-pools":
+      if (![p.minutes, p.quote, p.minLiquidityUsd, p.limit].every(str)) return "parameters must be scalars";
+      return p.quote !== undefined && p.quote !== "" && !["any", "weth", "usdc"].includes(String(p.quote).toLowerCase()) ? "quote must be any, weth or usdc" : null;
+    case "/cloud-prices":
+      for (const k of ["service", "region", "sku", "os", "priceType", "gpu", "maxResults"]) if (!str(p[k])) return `${k} must be a scalar`;
+      for (const k of ["service", "region", "sku"]) if (p[k] && !VAL_ID.test(String(p[k]).trim())) return `${k} may only contain letters, digits, space, _ . - (max 64 chars)`;
+      if (p.os && !["linux", "windows"].includes(String(p.os).trim().toLowerCase())) return "os must be linux or windows";
+      if (p.priceType && !["consumption", "reservation", "spot"].includes(String(p.priceType).trim().toLowerCase())) return "priceType must be Consumption, Reservation or Spot";
+      return null;
+  }
+  return null;
+}
+// Failed lookups return non-2xx so the x402 middleware cancels settlement (buyer is not charged).
+function failStatus(r) {
+  if (r.found === false) return 404;
+  if (r.ok !== false) return 200;
+  const e = String(r.error || "");
+  if (/no contract at this address/.test(e)) return 404;
+  if (/not an ERC-20|unsupported content-type/.test(e)) return 422;
+  if (/timeout|timed out|aborted/i.test(e)) return 504;
+  if (r.status === 404) return 404;
+  if (/redirect blocked|invalid URL|only http|blocked|credentials/.test(e)) return 400;
+  return 502;
+}
+const respond = (c, r) => c.json(r, failStatus(r));
+
 app.use(async (c, next) => {
+  const path = c.req.path;
+  if ((c.req.method === "GET" || c.req.method === "POST") && ROUTES[`${c.req.method} ${path}`]) {
+    const p = await params(c);
+    // Bare unpaid probes (directory crawlers, agents discovering price) must still see the 402 challenge;
+    // validate whenever input is supplied or a payment is attached, so nobody pays for a malformed request.
+    const paying = c.req.header("payment-signature") || c.req.header("x-payment");
+    const err = Object.keys(p).length || paying ? validate(path, p) : null;
+    if (err) return c.json({ error: err }, 400);
+    c.set("p", p);
+  }
   if (c.env?.DEV_FREE === "1") return next(); // local testing only (wrangler dev --var DEV_FREE:1); never set in production
   if (!synced && ROUTES[`${c.req.method} ${c.req.path}`]) { await server.initialize(); synced = true; }
   paywall ??= paymentMiddleware(ROUTES, server, undefined, undefined, false);
   return paywall(c, next);
 });
 
-// Params come from the query string (GET) or a JSON body (POST).
-const params = async c => c.req.method === "POST" ? await c.req.json().catch(() => ({})) : c.req.query();
-app.on(["GET", "POST"], "/tx", async c => { const h = (await params(c)).hash; return isHash(h) ? c.json(await explainTx(h)) : c.json({ error: "pass ?hash=0x…(64 hex)" }, 400); });
+app.onError((e, c) => c.json({ error: "upstream or internal error: " + String((e && e.message) || e).slice(0, 200), retryable: true }, 502));
 const num = (v, d) => (v === undefined || v === "" || isNaN(Number(v)) ? d : Number(v));
 const bool = v => v === true || v === "true" || v === "1";
-app.on(["GET", "POST"], "/new-pools", async c => { const p = await params(c);
+app.on(["GET", "POST"], "/tx", async c => respond(c, await explainTx(c.get("p").hash)));
+app.on(["GET", "POST"], "/new-pools", async c => { const p = c.get("p");
   return c.json(await newPools({ minutes: Math.min(Math.max(num(p.minutes, 30), 1), 120), quote: String(p.quote || "any").toLowerCase(), minLiquidityUsd: num(p.minLiquidityUsd, 0), limit: Math.min(Math.max(num(p.limit, 25), 1), 100) })); });
-app.on(["GET", "POST"], "/cloud-prices", async c => { const p = await params(c);
-  return c.json(await cloudPrices({ ...p, gpu: bool(p.gpu), maxResults: Math.min(Math.max(num(p.maxResults, 25), 1), 100) })); });
-app.on(["GET", "POST"], "/fetch", async c => { const p = await params(c); return p.url ? c.json(await fetchMarkdown(p.url, { maxChars: Math.min(Number(p.maxChars) || 50000, 200000) })) : c.json({ error: "pass url=https://…" }, 400); });
-app.on(["GET", "POST"], "/token-risk", async c => { const t = (await params(c)).token; return isAddr(t) ? c.json(await tokenRisk(t)) : c.json({ error: "pass token=0x…(40 hex)" }, 400); });
-app.on(["GET", "POST"], "/wallet", async c => { const a = (await params(c)).address; return isAddr(a) ? c.json(await walletSnapshot(a)) : c.json({ error: "pass ?address=0x…(40 hex)" }, 400); });
-app.on(["GET", "POST"], "/x402check", async c => { const p = await params(c); return p.url ? c.json(await x402Check(p.url, p.method)) : c.json({ error: "pass ?url=https://…" }, 400); });
+app.on(["GET", "POST"], "/cloud-prices", async c => { const p = c.get("p");
+  return respond(c, await cloudPrices({ ...p, gpu: bool(p.gpu), maxResults: Math.min(Math.max(num(p.maxResults, 25), 1), 100) })); });
+app.on(["GET", "POST"], "/fetch", async c => { const p = c.get("p"); return respond(c, await fetchMarkdown(p.url, { maxChars: Math.min(Math.max(Number(p.maxChars) || 50000, 1), 200000) })); });
+app.on(["GET", "POST"], "/token-risk", async c => respond(c, await tokenRisk(c.get("p").token)));
+app.on(["GET", "POST"], "/wallet", async c => c.json(await walletSnapshot(c.get("p").address)));
+app.on(["GET", "POST"], "/x402check", async c => { const p = c.get("p"); const r = await x402Check(p.url, p.method); return c.json(r, r.reachable === false ? (/timeout|abort/i.test(r.error || "") ? 504 : 502) : 200); });
 
 const DOCS = {
   name: "BaseLens", description: "Pay-per-call tools for AI agents: Base token scam check, new Base pools feed, Azure cloud/GPU prices, web page to markdown, tx explainer, wallet snapshot, x402 endpoint checker. No API key, no signup: pay USDC on Base per call via x402.",
@@ -218,7 +275,11 @@ const DOCS = {
   ],
   howToPay: "Call any endpoint; you get HTTP 402 with payment requirements. Use an x402 client (e.g. @x402/fetch, x402-axios, or an MCP x402 wallet) to sign and retry.",
 };
-app.get("/", c => c.json(DOCS));
+app.get("/", c => /text\/html/i.test(c.req.header("accept") || "") ? c.html(landingHtml(), 200, { "cache-control": "public, max-age=300", vary: "Accept" }) : c.json(DOCS, 200, { vary: "Accept" }));
+app.get("/llms.txt", c => c.text(llmsTxt(), 200, { "cache-control": "public, max-age=3600" }));
+app.get("/robots.txt", c => c.text(robotsTxt()));
+app.get("/d32fa5f5b0aa09cc644601941586b1c1.txt", c => c.text("d32fa5f5b0aa09cc644601941586b1c1"));
+app.get("/sitemap.xml", c => c.body(sitemapXml(), 200, { "content-type": "application/xml" }));
 app.get("/openapi.json", c => {
   const paths = {};
   for (const [k, r] of Object.entries(ROUTES)) {

@@ -9,11 +9,11 @@
     "deploy": "wrangler deploy"
   },
   "dependencies": {
+    "@noble/hashes": "^1.8.0",
     "@x402/core": "^2.26.0",
     "@x402/evm": "^2.26.0",
-    "@x402/extensions": "2.26.0",
+    "@x402/extensions": "^2.26.0",
     "@x402/hono": "^2.26.0",
-    "hono": "^4.13.11",
-    "@noble/hashes": "1.8.0"
+    "hono": "^4.13.11"
   }
 }

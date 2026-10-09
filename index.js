@@ -4,6 +4,8 @@ import { paymentMiddleware, x402ResourceServer } from "@x402/hono";
 import { ExactEvmScheme } from "@x402/evm/exact/server";
 import { HTTPFacilitatorClient } from "@x402/core/server";
 import { fetchMarkdown } from "./fetch.js";
+import { newPools } from "./pools.js";
+import { cloudPrices } from "./prices.js";
 import { tokenRisk, rpcBatch as rpcBatchRaw } from "./risk.js";
 import { bazaarResourceServerExtension, declareDiscoveryExtension } from "@x402/extensions/bazaar";
 
@@ -135,6 +137,14 @@ const route = (description, input, inputSchema, example, price = PRICE) => ({
 });
 
 const ROUTES = {
+  "GET /new-pools": route("Newly created liquidity pools on Base in the last N minutes (Uniswap v2/v3/v4, Aerodrome): token, quote, initial price, liquidity (USD where measurable), hooks, flags. For trading/sniper agents; pair with /token-risk before buying.",
+    { minutes: 30, quote: "weth", limit: 25 },
+    { type: "object", properties: { minutes: { type: "number", description: "Look-back window, 1-120 (default 30)" }, quote: { type: "string", enum: ["any", "weth", "usdc"], description: "Quote token filter (default any)" }, minLiquidityUsd: { type: "number", description: "Minimum USD liquidity (excludes v4 pools, whose liquidity is not measured)" }, limit: { type: "number", description: "Max pools, 1-100 (default 25)" } } },
+    { ok: true, count: 25, pools: [{ dex: "uniswap-v4", token: { symbol: "XYZ" }, quote: "WETH", ageMinutes: 3, priceUsd: 0.00012, flags: ["custom-hooks"] }] }),
+  "GET /cloud-prices": route("Live Azure cloud compute prices for agents comparing costs: filter by region, SKU substring (e.g. H100, A100, D4s), GPU-only, OS, consumption/spot/reservation. Returns hourly and monthly USD, sorted cheapest first.",
+    { gpu: true, region: "eastus" },
+    { type: "object", properties: { region: { type: "string", description: "Azure region, e.g. eastus, westeurope" }, sku: { type: "string", description: "SKU substring, e.g. H100, NC, D4s" }, gpu: { type: "boolean", description: "GPU VM families only" }, priceType: { type: "string", enum: ["Consumption", "Spot", "Reservation"] }, os: { type: "string", enum: ["linux", "windows"] }, maxResults: { type: "number", description: "1-100 (default 25)" } } },
+    { ok: true, count: 25, cheapest: { sku: "Standard_NV4as_v4", region: "eastus", hourlyUsd: 0.233 } }, "$0.02"),
   "GET /fetch": route("Fetch any public web page and get clean, LLM-ready markdown: main content (article/main), title, description, language, absolute links, word count. Text/JSON/markdown URLs are returned as-is. SSRF-safe, 2 MB cap, no JS rendering.",
     { url: "https://example.com" },
     { type: "object", properties: { url: { type: "string", description: "http(s) URL to fetch" }, maxChars: { type: "number", description: "Truncate markdown to this many characters (default 50000)" } }, required: ["url"] },
@@ -156,10 +166,18 @@ const ROUTES = {
     { type: "object", properties: { url: { type: "string", description: "https URL of an x402 endpoint" }, method: { type: "string", enum: ["GET", "POST"], description: "HTTP method the endpoint uses (default GET)" } }, required: ["url"] },
     { ok: true, isX402: true, latencyMs: 180, options: [{ network: "eip155:8453", priceUsd: 0.01 }], issues: [] }),
 };
+const ORIGIN = "https://baselens.imac2014ville.workers.dev";
+const TAGS = { "/new-pools": ["crypto", "base", "trading", "dex", "new-tokens"], "/cloud-prices": ["cloud", "pricing", "gpu", "azure", "finops"], "/fetch": ["web", "scrape", "markdown", "llm"], "/token-risk": ["crypto", "base", "security", "trading", "honeypot"],
+  "/tx": ["crypto", "base", "payments", "explorer"], "/wallet": ["crypto", "base", "wallet", "balances"], "/x402check": ["x402", "monitoring", "devtools"] };
 for (const k of Object.keys(ROUTES)) {
   const r = ROUTES[k], path = k.split(" ")[1];
   ROUTES["POST " + path] = { ...r, extensions: declareDiscoveryExtension({ bodyType: "json", input: r.extensions.bazaar.info.input.queryParams,
     inputSchema: r.extensions.bazaar.schema.properties.input.properties.queryParams, output: { example: r.extensions.bazaar.info.output.example } }) };
+}
+
+for (const [k, r] of Object.entries(ROUTES)) {
+  const path = k.split(" ")[1];
+  Object.assign(r, { resource: ORIGIN + path, serviceName: "BaseLens", tags: TAGS[path], iconUrl: ORIGIN + "/favicon.svg" });
 }
 
 // Workers forbid I/O at global scope and sharing promises across requests, so the
@@ -175,15 +193,23 @@ app.use(async (c, next) => {
 // Params come from the query string (GET) or a JSON body (POST).
 const params = async c => c.req.method === "POST" ? await c.req.json().catch(() => ({})) : c.req.query();
 app.on(["GET", "POST"], "/tx", async c => { const h = (await params(c)).hash; return isHash(h) ? c.json(await explainTx(h)) : c.json({ error: "pass ?hash=0x…(64 hex)" }, 400); });
+const num = (v, d) => (v === undefined || v === "" || isNaN(Number(v)) ? d : Number(v));
+const bool = v => v === true || v === "true" || v === "1";
+app.on(["GET", "POST"], "/new-pools", async c => { const p = await params(c);
+  return c.json(await newPools({ minutes: Math.min(Math.max(num(p.minutes, 30), 1), 120), quote: String(p.quote || "any").toLowerCase(), minLiquidityUsd: num(p.minLiquidityUsd, 0), limit: Math.min(Math.max(num(p.limit, 25), 1), 100) })); });
+app.on(["GET", "POST"], "/cloud-prices", async c => { const p = await params(c);
+  return c.json(await cloudPrices({ ...p, gpu: bool(p.gpu), maxResults: Math.min(Math.max(num(p.maxResults, 25), 1), 100) })); });
 app.on(["GET", "POST"], "/fetch", async c => { const p = await params(c); return p.url ? c.json(await fetchMarkdown(p.url, { maxChars: Math.min(Number(p.maxChars) || 50000, 200000) })) : c.json({ error: "pass url=https://…" }, 400); });
 app.on(["GET", "POST"], "/token-risk", async c => { const t = (await params(c)).token; return isAddr(t) ? c.json(await tokenRisk(t)) : c.json({ error: "pass token=0x…(40 hex)" }, 400); });
 app.on(["GET", "POST"], "/wallet", async c => { const a = (await params(c)).address; return isAddr(a) ? c.json(await walletSnapshot(a)) : c.json({ error: "pass ?address=0x…(40 hex)" }, 400); });
 app.on(["GET", "POST"], "/x402check", async c => { const p = await params(c); return p.url ? c.json(await x402Check(p.url, p.method)) : c.json({ error: "pass ?url=https://…" }, 400); });
 
 const DOCS = {
-  name: "BaseLens", description: "Pay-per-call tools for AI agents: web page to markdown, Base token risk check, tx explainer, wallet snapshot, x402 endpoint checker. No API key, no signup: pay USDC on Base per call via x402.",
+  name: "BaseLens", description: "Pay-per-call tools for AI agents: Base token scam check, new Base pools feed, Azure cloud/GPU prices, web page to markdown, tx explainer, wallet snapshot, x402 endpoint checker. No API key, no signup: pay USDC on Base per call via x402.",
   payment: { protocol: "x402 v2", network: NETWORK, asset: "USDC", price: PRICE, payTo: PAY_TO },
   endpoints: [
+    { method: "POST", path: "/new-pools {minutes, quote}", price: "$0.01", what: "New Base pools (Uni v2/v3/v4, Aerodrome)" },
+    { method: "POST", path: "/cloud-prices {gpu, region, sku}", price: "$0.02", what: "Azure compute prices, cheapest first" },
     { method: "POST", path: "/fetch {url}", price: "$0.004", what: "Web page to clean markdown" },
     { method: "POST", path: "/token-risk {token}", price: "$0.02", what: "Base token scam/honeypot check" },
     { method: "GET", path: "/tx?hash=0x…", what: "Explain a Base transaction / verify a payment" },
@@ -209,9 +235,10 @@ app.get("/openapi.json", c => {
     (paths[path] ??= {})[m] = op;
   }
   return c.json({ openapi: "3.1.0", info: { title: "BaseLens", version: "1.1.0", contact: { name: "BaseLens", url: "https://github.com/Imac2014Ville/baselens" }, description: DOCS.description,
-    "x-guidance": "Agent utilities paid per call in USDC on Base via x402. POST /fetch {url} ($0.004) turns any web page into clean markdown. POST /token-risk {token} ($0.02) is a Base token scam/honeypot check with a verdict and risk score. Other Base tools ($0.005-0.01): POST /tx {hash} explains a transaction and verifies payments (status, confirmations, decoded ERC-20 transfers). POST /wallet {address} returns ETH + major token balances and account type. POST /x402check {url, method} health-checks another x402 endpoint (price, network, schema issues) before you pay it. GET with query params also works." },
+    "x-guidance": "Agent utilities paid per call in USDC on Base via x402. POST /new-pools {minutes, quote} ($0.01) lists newly created Base pools for trading agents. POST /cloud-prices {gpu, region, sku} ($0.02) returns Azure compute prices, cheapest first. POST /fetch {url} ($0.004) turns any web page into clean markdown. POST /token-risk {token} ($0.02) is a Base token scam/honeypot check with a verdict and risk score. Other Base tools ($0.005-0.01): POST /tx {hash} explains a transaction and verifies payments (status, confirmations, decoded ERC-20 transfers). POST /wallet {address} returns ETH + major token balances and account type. POST /x402check {url, method} health-checks another x402 endpoint (price, network, schema issues) before you pay it. GET with query params also works." },
     servers: [{ url: new URL(c.req.url).origin }], paths });
 });
+app.get("/.well-known/x402", c => c.json({ version: 1, resources: [...new Set(Object.keys(ROUTES).map(k => ORIGIN + k.split(" ")[1]))] }));
 app.get("/health", c => c.json({ ok: true }));
 const ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#0052ff"/><circle cx="28" cy="28" r="13" fill="none" stroke="#fff" stroke-width="6"/><path d="M38 38l12 12" stroke="#fff" stroke-width="7" stroke-linecap="round"/></svg>`;
 app.get("/favicon.ico", c => c.body(ICON, 200, { "content-type": "image/svg+xml", "cache-control": "public, max-age=86400" }));

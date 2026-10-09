@@ -7,6 +7,8 @@ Pay-per-call tools for AI agents. **No API key, no signup.** Pay per call in **U
 | Endpoint | Price | What it does |
 |---|---|---|
 | `POST /token-risk` `{ "token": "0x…" }` | $0.02 | **Scam/honeypot check for Base tokens before you buy.** Simulates a sell into the main pool and detects owner powers (mint, blacklist, pause, fee changes, upgradeable proxy). Also reports ownership renounced, owner holdings, USD liquidity across Uniswap v2/v3 and Aerodrome, LP burn and price. Verdict `LOW_RISK` / `CAUTION` / `HIGH_RISK` / `AVOID` + 0-100 score. |
+| `POST /new-pools` `{ "minutes": 30, "quote": "weth" }` | $0.01 | Newly created Base pools (Uniswap v2/v3/v4, Aerodrome) with token, quote, initial price, liquidity, hooks and flags. Built for trading agents. |
+| `POST /cloud-prices` `{ "gpu": true, "region": "eastus" }` | $0.02 | Live Azure compute and GPU prices (consumption/spot/reservation), cheapest first, hourly + monthly USD. |
 | `POST /fetch` `{ "url": "https://…" }` | $0.004 | Any web page as clean, LLM-ready markdown: main content, title, description, links, word count. SSRF-safe. |
 | `POST /tx` `{ "hash": "0x…" }` | $0.01 | Explains a Base transaction in plain English: status, confirmations, fee, decoded ERC-20 transfers (symbol + amount). Handy for **verifying a payment landed**. |
 | `POST /wallet` `{ "address": "0x…" }` | $0.005 | ETH balance, nonce, EOA vs contract (detects EIP-7702 delegation), balances of USDC, USDbC, WETH, cbBTC, cbETH, DAI, EURC, AERO. |
